@@ -44,7 +44,7 @@ def main(args):
 
     old = dataset.load_particles(args.mrcs, lazy=True, datadir=args.datadir)
     oldD = old[0].get().shape[0]
-    assert args.D < oldD, f'New box size {args.D} must be smaller than original box size {oldD}'
+    assert args.D <= oldD, f'New box size {args.D} must be equal or smaller than original box size {oldD}'
     assert args.D % 2 == 0, 'New box size must be even'
     
     D = args.D
@@ -67,10 +67,13 @@ def main(args):
             if i % 1000 == 0:
                 log(f'Processing image {i} of {len(old)}')
             img = old[i]
-            oldft = fft.ht2_center(img.get()).astype(np.float32)
-            newft = oldft[start:stop, start:stop]
-            new.append(fft.ihtn_center(newft).astype(np.float32))
-        assert oldft[int(oldD/2),int(oldD/2)] == newft[int(D/2),int(D/2)]
+            if D<oldD:
+                oldft = fft.ht2_center(img.get()).astype(np.float32)
+                newft = oldft[start:stop, start:stop]
+                new.append(fft.ihtn_center(newft).astype(np.float32))
+                assert oldft[int(oldD / 2), int(oldD / 2)] == newft[int(D / 2), int(D / 2)]
+            else:
+                new.append(img.get().astype(np.float32))
         new = np.asarray(new)
         log(new.shape)
         log('Saving {}'.format(args.o))
