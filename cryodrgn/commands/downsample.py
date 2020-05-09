@@ -38,7 +38,6 @@ def main(args):
 
     old = dataset.load_particles(args.mrcs, lazy=True, datadir=args.datadir)
     oldD = old[0].get().shape[0]
-    assert args.D <= oldD, f'New box size {args.D} must be equal or smaller than original box size {oldD}'
     assert args.D <= oldD, f'New box size {args.D} cannot be larger than the original box size {oldD}'
     assert args.D % 2 == 0, 'New box size must be even'
     

@@ -44,12 +44,12 @@ def analyze_z1(z, outdir, vg):
     plt.scatter(np.arange(N), z, alpha=.1, s=2)
     plt.xlabel('particle')
     plt.ylabel('z')
-    plt.savefig(f'{outdir}/z.png')
+    plt.savefig(f'{outdir}/z.pdf')
 
     plt.figure(2)
     sns.distplot(z)
     plt.xlabel('z')
-    plt.savefig(f'{outdir}/z_hist.png')
+    plt.savefig(f'{outdir}/z_hist.pdf')
 
     ztraj = np.linspace(*np.percentile(z,(5,95)), 10) # or np.percentile(z, np.linspace(5,95,10)) ?
     vg.gen_volumes(outdir, ztraj)
@@ -94,25 +94,25 @@ def analyze_zN(z, outdir, vg, skip_umap=False):
     plt.scatter(pc[:,0], pc[:,1], alpha=.1, s=2)
     plt.xlabel('PC1')
     plt.ylabel('PC2')
-    plt.savefig(f'{outdir}/z_pca.png')
+    plt.savefig(f'{outdir}/z_pca.pdf')
     
     if zdim > 2 and not skip_umap:
         plt.figure(2)
         plt.scatter(umap_emb[:,0], umap_emb[:,1], alpha=.1, s=2)
         plt.xlabel('UMAP1')
         plt.ylabel('UMAP2')
-        plt.savefig(f'{outdir}/umap.png')
+        plt.savefig(f'{outdir}/umap.pdf')
 
     analysis.plot_by_cluster(pc[:,0], pc[:,1], K, kmeans_labels, centers_ind=centers_ind, annotate=True)
     plt.xlabel('PC1')
     plt.ylabel('PC2')
-    plt.savefig(f'{outdir}/kmeans20/z_pca.png')
+    plt.savefig(f'{outdir}/kmeans20/z_pca.pdf')
 
     if zdim > 2 and not skip_umap:
         analysis.plot_by_cluster(umap_emb[:,0], umap_emb[:,1], K, kmeans_labels, centers_ind=centers_ind, annotate=True)
         plt.xlabel('UMAP1')
         plt.ylabel('UMAP2')
-        plt.savefig(f'{outdir}/kmeans20/umap.png')
+        plt.savefig(f'{outdir}/kmeans20/umap.pdf')
  
 class VolumeGenerator:
     '''Helper class to call analysis.gen_volumes'''
