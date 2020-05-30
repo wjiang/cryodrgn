@@ -17,12 +17,13 @@ class Starfile():
         self.df = df
 
     @classmethod
-    def load(self, starfile):
+    def load(self, starfile, relion31=False):
         f = open(starfile,'r')
         # get to data block
+        BLOCK = 'data_particles' if relion31 else 'data_'
         while 1:
             for line in f:
-                if line.startswith('data_'):
+                if line.startswith(BLOCK):
                     break
             break
         # get to header loop
@@ -40,15 +41,18 @@ class Starfile():
                 else:
                     break
             break 
-        # assume the rest is the body
+        # assume all subsequent lines until empty line is the body
         headers = [h.strip().split()[0] for h in headers]
-        body = [line] + f.readlines()
-        # remove last line of body if empty
-        if body[-1].strip() == '':
-            body = body[:-1]
+        body = [line]
+        for line in f:
+            if line.strip() == '':
+                break
+            body.append(line)
         # put data into an array and instantiate as dataframe
         words = [l.strip().split() for l in body]
         words = np.array(words)
+        assert words.ndim == 2, f"Uneven # columns detected in parsing {set([len(x) for x in words])}. Is this a RELION 3.1 starfile?" 
+        assert words.shape[1] == len(headers), f"Error in parsing. Number of columns {words.shape[1]} != number of headers {len(headers)}" 
         data = {h:words[:,i] for i,h in enumerate(headers)}
         df = pd.DataFrame(data=data)
         return self(headers, df)

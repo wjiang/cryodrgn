@@ -33,7 +33,7 @@ def add_args(parser):
     parser.add_argument('--zdim', type=int, required=True, help='Dimension of latent variable')
     parser.add_argument('--poses', type=os.path.abspath, required=True, help='Image poses (.pkl)')
     parser.add_argument('--ctf', metavar='pkl', type=os.path.abspath, help='CTF parameters (.pkl)')
-    parser.add_argument('--load', type=os.path.abspath, metavar='WEIGHTS.PKL', help='Initialize training from a checkpoint')
+    parser.add_argument('--load', metavar='WEIGHTS.PKL', help='Initialize training from a checkpoint')
     parser.add_argument('--checkpoint', type=int, default=1, help='Checkpointing interval in N_EPOCHS (default: %(default)s)')
     parser.add_argument('--log-interval', type=int, default=1000, help='Logging interval in N_IMGS (default: %(default)s)')
     parser.add_argument('-v','--verbose',action='store_true',help='Increaes verbosity')
@@ -45,6 +45,7 @@ def add_args(parser):
     group.add_argument('--ind', type=os.path.abspath, help='Filter particle stack by these indices')
     group.add_argument('--lazy', action='store_true', help='Lazy loading if full dataset is too large to fit in memory')
     group.add_argument('--datadir', type=os.path.abspath, help='Path prefix to particle stack if loading relative paths from a .star or .cs file')
+    parser.add_argument('--relion31', action='store_true', help='Flag if relion3.1 star format')
 
     group = parser.add_argument_group('Tilt series')
     group.add_argument('--tilt', help='Particles (.mrcs)')
@@ -76,6 +77,7 @@ def add_args(parser):
     group.add_argument('--players', type=int, default=3, help='Number of hidden layers (default: %(default)s)')
     group.add_argument('--pdim', type=int, default=256, help='Number of nodes in hidden layers (default: %(default)s)')
     group.add_argument('--pe-type', choices=('geom_ft','geom_full','geom_lowf','geom_nohighf','linear_lowf','none'), default='geom_lowf', help='Type of positional encoding (default: %(default)s)')
+    group.add_argument('--pe-dim', type=int, help='Num sinusoid features in positional encoding (default: D/2)')
     group.add_argument('--domain', choices=('hartley','fourier'), default='fourier', help='Decoder representation domain (default: %(default)s)')
     return parser
 
@@ -213,6 +215,7 @@ def save_config(args, dataset, lattice, model, out_config):
                       encode_mode=args.encode_mode,
                       enc_mask=args.enc_mask,
                       pe_type=args.pe_type,
+                      pe_dim=args.pe_dim,
                       domain=args.domain)
     config = dict(dataset_args=dataset_args,
                   lattice_args=lattice_args,
@@ -221,6 +224,21 @@ def save_config(args, dataset, lattice, model, out_config):
     with open(out_config,'wb') as f:
         pickle.dump(config, f)
 
+def get_latest(args):
+    # Assumes checkpoint==1, todo: make this more robust
+    log('Detecting latest checkpoint...') 
+    for i in range(args.num_epochs):
+        weights = f'{args.outdir}/weights.{i}.pkl'
+        if not os.path.exists(weights):
+            break
+    args.load =  f'{args.outdir}/weights.{i-1}.pkl'
+    log(f'Loading {args.load}')
+    if args.do_pose_sgd:
+        args.poses = f'{args.outdir}/pose.{i-1}.pkl'
+        assert os.path.exists(args.poses)
+        log(f'Loading {args.poses}')
+    return args
+
 def main(args):
     t1 = dt.now()
     if args.outdir is not None and not os.path.exists(args.outdir):
@@ -228,6 +246,8 @@ def main(args):
     LOG = f'{args.outdir}/run.log'
     def flog(msg): # HACK: switch to logging module
         return utils.flog(msg, LOG)
+    if args.load == 'latest':
+        args = get_latest(args)
     flog(' '.join(sys.argv))
     flog(args)
 
@@ -258,13 +278,14 @@ def main(args):
         if args.encode_mode == 'conv':
             args.use_real = True
         if args.lazy:
-            data = dataset.LazyMRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, keepreal=args.use_real, window=args.window, datadir=args.datadir)
+            data = dataset.LazyMRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, keepreal=args.use_real, window=args.window, datadir=args.datadir, relion31=args.relion31)
         else:
-            data = dataset.MRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, keepreal=args.use_real, window=args.window, datadir=args.datadir)
+            data = dataset.MRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, keepreal=args.use_real, window=args.window, datadir=args.datadir, relion31=args.relion31)
         tilt = None
     else:
         assert args.encode_mode == 'tilt'
         if args.lazy: raise NotImplementedError
+        if args.relion31: raise NotImplementedError
         data = dataset.TiltMRCData(args.particles, args.tilt, norm=args.norm, invert_data=args.invert_data, ind=ind, window=args.window, keepreal=args.use_real, datadir=args.datadir)
         tilt = torch.tensor(utils.xrot(args.tilt_deg).astype(np.float32))
     Nimg = data.N
@@ -304,7 +325,7 @@ def main(args):
         raise RuntimeError("Invalid argument for encoder mask radius {}".format(args.enc_mask))
     model = HetOnlyVAE(lattice, args.qlayers, args.qdim, args.players, args.pdim,
                 in_dim, args.zdim, encode_mode=args.encode_mode, enc_mask=enc_mask,
-                enc_type=args.pe_type, domain=args.domain)
+                enc_type=args.pe_type, enc_dim=args.pe_dim, domain=args.domain)
     flog(model)
     flog('{} parameters in model'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 

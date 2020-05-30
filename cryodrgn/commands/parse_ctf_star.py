@@ -16,6 +16,7 @@ def add_args(parser):
     parser.add_argument('star', help='Input')
     parser.add_argument('--Apix', type=float, required=True, help='Angstroms per pixel')
     parser.add_argument('-D', type=int, required=True, help='Image size in pixels')
+    parser.add_argument('--relion31', action='store_true', help='Flag for relion3.1 star format')
     parser.add_argument('-o', type=os.path.abspath, required=True, help='Output pkl of CTF parameters')
     parser.add_argument('--png', metavar='PNG', type=os.path.abspath, help='Optionally plot the CTF')
 
@@ -29,8 +30,12 @@ def add_args(parser):
 def main(args):
     assert args.star.endswith('.star'), "Input file must be .star file"
     assert args.o.endswith('.pkl'), "Output CTF parameters must be .pkl file"
+    if args.relion31: # TODO: parse the data_optics block
+        assert args.kv is not None, "--kv must be set manually with RELION 3.1 file format"
+        assert args.cs is not None, "--cs must be set manually with RELION 3.1 file format"
+        assert args.w is not None, "--w must be set manually with RELION 3.1 file format"
     
-    s = starfile.Starfile.load(args.star)
+    s = starfile.Starfile.load(args.star, relion31=args.relion31)
     N = len(s.df)
     log('{} particles'.format(N))
     
