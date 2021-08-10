@@ -7,6 +7,7 @@ def main():
     parser.add_argument('--version', action='version', version='cryoDRGN '+cryodrgn.__version__)
 
     import cryodrgn.commands.downsample
+    import cryodrgn.commands.preprocess
     import cryodrgn.commands.parse_pose_star
     import cryodrgn.commands.parse_pose_csparc
     import cryodrgn.commands.parse_ctf_star
@@ -19,8 +20,10 @@ def main():
     import cryodrgn.commands.analyze
     import cryodrgn.commands.pc_traversal
     import cryodrgn.commands.graph_traversal
+    import cryodrgn.commands.view_config
 
     modules = [cryodrgn.commands.downsample,
+        cryodrgn.commands.preprocess,
         cryodrgn.commands.parse_pose_csparc,
         cryodrgn.commands.parse_pose_star,
         cryodrgn.commands.parse_ctf_csparc,
@@ -33,6 +36,7 @@ def main():
         cryodrgn.commands.analyze,
         cryodrgn.commands.pc_traversal,
         cryodrgn.commands.graph_traversal,
+        cryodrgn.commands.view_config,
         ]
 
     subparsers = parser.add_subparsers(title='Choose a command')

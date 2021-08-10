@@ -2,6 +2,8 @@ import numpy as np
 import torch
 from torch.utils import data
 import os
+import multiprocessing as mp
+from multiprocessing import Pool
 
 from . import fft
 from . import mrc
@@ -39,9 +41,9 @@ class LazyMRCData(data.Dataset):
     '''
     Class representing an .mrcs stack file -- images loaded on the fly
     '''
-    def __init__(self, mrcfile, norm=None, keepreal=False, invert_data=False, ind=None, window=True, datadir=None, relion31=False):
+    def __init__(self, mrcfile, norm=None, keepreal=False, invert_data=False, ind=None, window=True, datadir=None, relion31=False, window_r=0.85):
         assert not keepreal, 'Not implemented error'
-        particles = load_particles(mrcfile, True, datadir, relion31=False)
+        particles = load_particles(mrcfile, True, datadir=datadir, relion31=relion31)
         if ind is not None:
             particles = [particles[x] for x in ind]
         N = len(particles)
@@ -56,7 +58,7 @@ class LazyMRCData(data.Dataset):
         if norm is None:
             norm = self.estimate_normalization()
         self.norm = norm
-        self.window = window_mask(ny, .85, .99) if window else None
+        self.window = window_mask(ny, window_r, .99) if window else None
 
     def estimate_normalization(self, n=1000):
         n = min(n,self.N)
@@ -96,25 +98,39 @@ class MRCData(data.Dataset):
     '''
     Class representing an .mrcs stack file
     '''
-    def __init__(self, mrcfile, norm=None, keepreal=False, invert_data=False, ind=None, window=True, datadir=None, relion31=False):
-        particles_real = load_particles(mrcfile, False, datadir, relion31=False)
+    def __init__(self, mrcfile, norm=None, keepreal=False, invert_data=False, ind=None, window=True, datadir=None, relion31=False, max_threads=16, window_r=0.85):
+        if keepreal:
+            raise NotImplementedError
         if ind is not None:
-            particles_real = particles_real[ind]
-        N, ny, nx = particles_real.shape
+            particles = load_particles(mrcfile, True, datadir=datadir, relion31=relion31)
+            particles = np.array([particles[i].get() for i in ind])
+        else:
+            particles = load_particles(mrcfile, False, datadir=datadir, relion31=relion31)
+        N, ny, nx = particles.shape
         assert ny == nx, "Images must be square"
         assert ny % 2 == 0, "Image size must be even"
         log('Loaded {} {}x{} images'.format(N, ny, nx))
 
         # Real space window
         if window:
-            particles_real *= window_mask(ny, .85, .99)
+            log(f'Windowing images with radius {window_r}')
+            particles *= window_mask(ny, window_r, .99)
 
         # compute HT
-        particles = np.asarray([fft.ht2_center(img) for img in particles_real])
-        particles = particles.astype(np.float32)
+        log('Computing FFT')
+        max_threads = min(max_threads, mp.cpu_count())
+        if max_threads > 1:
+            log(f'Spawning {max_threads} processes')
+            with Pool(max_threads) as p:
+                particles = np.asarray(p.map(fft.ht2_center, particles), dtype=np.float32)
+        else:
+            particles = np.asarray([fft.ht2_center(img) for img in particles], dtype=np.float32)
+            log('Converted to FFT')
+            
         if invert_data: particles *= -1
 
         # symmetrize HT
+        log('Symmetrizing image data')
         particles = fft.symmetrize_ht(particles)
 
         # normalize
@@ -143,21 +159,47 @@ class MRCData(data.Dataset):
     def get(self, index):
         return self.particles[index]
 
+class PreprocessedMRCData(data.Dataset):
+    '''
+    '''
+    def __init__(self, mrcfile, norm=None, ind=None):
+        particles = load_particles(mrcfile, False)
+        if ind is not None:
+            particles = particles[ind]
+        log(f'Loaded {len(particles)} {particles.shape[1]}x{particles.shape[1]} images')
+        if norm is None:
+            norm  = [np.mean(particles), np.std(particles)]
+            norm[0] = 0
+        particles = (particles - norm[0])/norm[1]
+        log('Normalized HT by {} +/- {}'.format(*norm))
+        self.particles = particles
+        self.N = len(particles)
+        self.D = particles.shape[1] # ny + 1 after symmetrizing HT
+        self.norm = norm
+
+    def __len__(self):
+        return self.N
+
+    def __getitem__(self, index):
+        return self.particles[index], index
+
+    def get(self, index):
+        return self.particles[index]
+
 class TiltMRCData(data.Dataset):
     '''
     Class representing an .mrcs tilt series pair
     '''
-    def __init__(self, mrcfile, mrcfile_tilt, norm=None, keepreal=False, invert_data=False, ind=None, window=True, datadir=None):
-        # load untilted
-        particles_real = load_particles(mrcfile, False, datadir)
-
-        # load tilt series
-        particles_tilt_real = load_particles(mrcfile_tilt, False, datadir)
-
-        # filter dataset
+    def __init__(self, mrcfile, mrcfile_tilt, norm=None, keepreal=False, invert_data=False, ind=None, window=True, datadir=None, window_r=0.85):
         if ind is not None:
-            particles_real = particles_real[ind]
-            particles_tilt_real = particles_tilt_real[ind]
+            particles_real = load_particles(mrcfile, True, datadir)
+            particles_tilt_real = load_particles(mrcfile_tilt, True, datadir)
+            particles_real = np.array([particles_real[i].get() for i in ind], dtype=np.float32)
+            particles_tilt_real = np.array([particles_tilt_real[i].get() for i in ind], dtype=np.float32)
+        else:
+            particles_real = load_particles(mrcfile, False, datadir)
+            particles_tilt_real = load_particles(mrcfile_tilt, False, datadir)
+
         N, ny, nx = particles_real.shape
         assert ny == nx, "Images must be square"
         assert ny % 2 == 0, "Image size must be even"
@@ -167,7 +209,7 @@ class TiltMRCData(data.Dataset):
 
         # Real space window
         if window:
-            m = window_mask(ny, .85, .99)
+            m = window_mask(ny, window_r, .99)
             particles_real *= m
             particles_tilt_real *= m 
 

@@ -13,8 +13,12 @@ from .mrc import LazyImage
 class Starfile():
     
     def __init__(self, headers, df):
+        assert headers == list(df.columns), f'{headers} != {df.columns}'
         self.headers = headers
         self.df = df
+
+    def __len__(self):
+        return len(self.df)
 
     @classmethod
     def load(self, starfile, relion31=False):
@@ -66,7 +70,8 @@ class Starfile():
         f.write('\n'.join(self.headers))
         f.write('\n')
         for i in self.df.index:
-            f.write(' '.join(self.df.loc[i]))
+            # TODO: Assumes header and df ordering is consistent
+            f.write(' '.join([str(v) for v in self.df.loc[i]]))
             f.write('\n')
         #f.write('\n'.join([' '.join(self.df.loc[i]) for i in range(len(self.df))]))
 
@@ -89,9 +94,10 @@ class Starfile():
             mrcs = prefix_paths(mrcs, datadir)
         for path in set(mrcs):
             assert os.path.exists(path), f'{path} not found'
-        D = mrc.parse_header(mrcs[0]).D # image size along one dimension in pixels
-        dtype = np.float32
-        stride = np.float32().itemsize*D*D
+        header = mrc.parse_header(mrcs[0])
+        D = header.D # image size along one dimension in pixels
+        dtype = header.dtype
+        stride = dtype().itemsize*D*D
         dataset = [LazyImage(f, (D,D), dtype, 1024+ii*stride) for ii,f in zip(ind, mrcs)]
         if not lazy:
             dataset = np.array([x.get() for x in dataset])

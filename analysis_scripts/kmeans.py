@@ -6,11 +6,9 @@ import sys, os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pickle
-from scipy.spatial.distance import cdist
-
-from sklearn.manifold import TSNE
+from cryodrgn import analysis
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans, MiniBatchKMeans
+from scipy.spatial.distance import cdist
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -21,6 +19,8 @@ def parse_args():
     parser.add_argument('--out-png', help='Output image (.png)')
     parser.add_argument('--out-k', help='Output cluster centers z values (.txt)')
     parser.add_argument('--on-data', action='store_true', help='Use nearest data point instead of cluster center')
+    parser.add_argument('--out-k-ind', help='Output cluster center indices (.txt)')
+    parser.add_argument('--reorder', action='store_true', help='Reorder cluster centers')
     return parser
 
 def main(args):
@@ -32,11 +32,7 @@ def main(args):
     print('{} points'.format(len(z)))
     
     # k-means clustering
-    kmeans = KMeans(n_clusters=args.k,
-                    random_state=0,
-                    max_iter=10)
-    labels = kmeans.fit_predict(z)
-    centers = kmeans.cluster_centers_
+    labels, centers = analysis.cluster_kmeans(z, args.k, on_data=args.on_data, reorder=args.reorder)
 
     # use the nearest data point instead of cluster centroid
     if args.on_data: 
@@ -44,6 +40,8 @@ def main(args):
         print(centers_zi)
         centers_z = z[centers_zi]
         centers = centers_z
+        if args.out_k_ind:
+            np.savetxt(args.out_k_ind, centers_zi, fmt='%d')
 
     if args.o:
         with open(args.o, 'wb') as f:

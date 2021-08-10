@@ -6,7 +6,7 @@ import argparse
 import numpy as np
 import sys, os
 import pickle
-import subprocess
+import shutil
 from datetime import datetime as dt
 
 import matplotlib
@@ -32,6 +32,8 @@ def add_args(parser):
     group.add_argument('--Apix', type=float, default=1, help='Pixel size to add to .mrc header (default: %(default)s A/pix)')
     group.add_argument('--flip', action='store_true', help='Flip handedness of output volume')
     group.add_argument('-d','--downsample', type=int, help='Downsample volumes to this box size (pixels)')
+    group.add_argument('--pc', type=int, default=2, help='Number of principal component traversals to generate (default: %(default)s)')
+    group.add_argument('--ksample', type=int, default=20, help='Number of kmeans samples to generate (default: %(default)s)')
     return parser
 
 def analyze_z1(z, outdir, vg):
@@ -44,43 +46,40 @@ def analyze_z1(z, outdir, vg):
     plt.scatter(np.arange(N), z, alpha=.1, s=2)
     plt.xlabel('particle')
     plt.ylabel('z')
-    plt.savefig(f'{outdir}/z.pdf')
+    plt.savefig(f'{outdir}/z.png')
 
     plt.figure(2)
     sns.distplot(z)
     plt.xlabel('z')
-    plt.savefig(f'{outdir}/z_hist.pdf')
+    plt.savefig(f'{outdir}/z_hist.png')
 
     ztraj = np.linspace(*np.percentile(z,(5,95)), 10) # or np.percentile(z, np.linspace(5,95,10)) ?
     vg.gen_volumes(outdir, ztraj)
 
-def analyze_zN(z, outdir, vg, skip_umap=False):
+def analyze_zN(z, outdir, vg, skip_umap=False, num_pcs=2, num_ksamples=20):
     zdim = z.shape[1]
 
     # Principal component analysis
     log('Perfoming principal component analysis...')
-    pc, pca = analysis.run_pca(z)
-    start, end = np.percentile(pc[:,0],(5,95))
-    z_pc1 = analysis.get_pc_traj(pca, z.shape[1], 10, 1, start, end)
-    start, end = np.percentile(pc[:,1],(5,95))
-    z_pc2 = analysis.get_pc_traj(pca, z.shape[1], 10, 2, start, end)
+    pc, pca = analysis.run_pca(z)  
+    log('Generating volumes...')
+    for i in range(num_pcs):
+        start, end = np.percentile(pc[:,i],(5,95))
+        z_pc = analysis.get_pc_traj(pca, z.shape[1], 10, i+1, start, end)
+        vg.gen_volumes(f'{outdir}/pc{i+1}', z_pc)
 
     # kmeans clustering
     log('K-means clustering...')
-    K = 20
+    K = num_ksamples
     kmeans_labels, centers = analysis.cluster_kmeans(z, K)
     centers, centers_ind = analysis.get_nearest_point(z, centers)
-    if not os.path.exists(f'{outdir}/kmeans20'): 
-        os.mkdir(f'{outdir}/kmeans20')
-    utils.save_pkl(kmeans_labels, f'{outdir}/kmeans20/labels.pkl')
-    np.savetxt(f'{outdir}/kmeans20/centers.txt', centers)
-    np.savetxt(f'{outdir}/kmeans20/centers_ind.txt', centers_ind, fmt='%d')
-
-    # Generate volumes
+    if not os.path.exists(f'{outdir}/kmeans{K}'): 
+        os.mkdir(f'{outdir}/kmeans{K}')
+    utils.save_pkl(kmeans_labels, f'{outdir}/kmeans{K}/labels.pkl')
+    np.savetxt(f'{outdir}/kmeans{K}/centers.txt', centers)
+    np.savetxt(f'{outdir}/kmeans{K}/centers_ind.txt', centers_ind, fmt='%d')
     log('Generating volumes...')
-    vg.gen_volumes(f'{outdir}/pc1', z_pc1)
-    vg.gen_volumes(f'{outdir}/pc2', z_pc2)
-    vg.gen_volumes(f'{outdir}/kmeans20', centers)
+    vg.gen_volumes(f'{outdir}/kmeans{K}', centers)
 
     # UMAP -- slow step
     if zdim > 2 and not skip_umap:
@@ -91,28 +90,58 @@ def analyze_zN(z, outdir, vg, skip_umap=False):
     # Make some plots
     log('Generating plots...')
     plt.figure(1)
-    plt.scatter(pc[:,0], pc[:,1], alpha=.1, s=2)
-    plt.xlabel('PC1')
-    plt.ylabel('PC2')
-    plt.savefig(f'{outdir}/z_pca.pdf')
+    g = sns.jointplot(x=pc[:,0], y=pc[:,1], alpha=.1, s=2)
+    g.set_axis_labels('PC1','PC2')
+    plt.tight_layout()
+    plt.savefig(f'{outdir}/z_pca.png')
     
-    if zdim > 2 and not skip_umap:
-        plt.figure(2)
-        plt.scatter(umap_emb[:,0], umap_emb[:,1], alpha=.1, s=2)
-        plt.xlabel('UMAP1')
-        plt.ylabel('UMAP2')
-        plt.savefig(f'{outdir}/umap.pdf')
+    plt.figure(2)
+    g = sns.jointplot(x=pc[:,0], y=pc[:,1], kind='hex')
+    g.set_axis_labels('PC1','PC2')
+    plt.tight_layout()
+    plt.savefig(f'{outdir}/z_pca_hexbin.png')
 
-    analysis.plot_by_cluster(pc[:,0], pc[:,1], K, kmeans_labels, centers_ind=centers_ind, annotate=True)
+    if zdim > 2 and not skip_umap:
+        plt.figure(3)
+        g = sns.jointplot(x=umap_emb[:,0], y=umap_emb[:,1], alpha=.1, s=2)
+        g.set_axis_labels('UMAP1','UMAP2')
+        plt.tight_layout()
+        plt.savefig(f'{outdir}/umap.png')
+
+        plt.figure(4)
+        g = sns.jointplot(x=umap_emb[:,0], y=umap_emb[:,1], kind='hex')
+        g.set_axis_labels('UMAP1','UMAP2')
+        plt.tight_layout()
+        plt.savefig(f'{outdir}/umap_hexbin.png')
+
+    analysis.scatter_annotate(pc[:,0], pc[:,1], centers_ind=centers_ind, annotate=True)
     plt.xlabel('PC1')
     plt.ylabel('PC2')
-    plt.savefig(f'{outdir}/kmeans20/z_pca.pdf')
+    plt.savefig(f'{outdir}/kmeans{K}/z_pca.png')
+
+    g = analysis.scatter_annotate_hex(pc[:,0], pc[:,1], centers_ind=centers_ind, annotate=True)
+    g.set_axis_labels('PC1','PC2')
+    plt.tight_layout()
+    plt.savefig(f'{outdir}/kmeans{K}/z_pca_hex.png')
 
     if zdim > 2 and not skip_umap:
-        analysis.plot_by_cluster(umap_emb[:,0], umap_emb[:,1], K, kmeans_labels, centers_ind=centers_ind, annotate=True)
+        analysis.scatter_annotate(umap_emb[:,0], umap_emb[:,1], centers_ind=centers_ind, annotate=True)
         plt.xlabel('UMAP1')
         plt.ylabel('UMAP2')
-        plt.savefig(f'{outdir}/kmeans20/umap.pdf')
+        plt.savefig(f'{outdir}/kmeans{K}/umap.png')
+
+        g = analysis.scatter_annotate_hex(umap_emb[:,0], umap_emb[:,1], centers_ind=centers_ind, annotate=True)
+        g.set_axis_labels('UMAP1','UMAP2')
+        plt.tight_layout()
+        plt.savefig(f'{outdir}/kmeans{K}/umap_hex.png')
+
+    for i in range(num_pcs):
+        if zdim > 2 and not skip_umap:
+            analysis.scatter_color(umap_emb[:,0], umap_emb[:,1], pc[:,i], label=f'PC{i+1}')
+            plt.xlabel('UMAP1')
+            plt.ylabel('UMAP2')
+            plt.tight_layout()
+            plt.savefig(f'{outdir}/pc{i+1}/umap.png')
  
 class VolumeGenerator:
     '''Helper class to call analysis.gen_volumes'''
@@ -158,15 +187,24 @@ def main(args):
     if zdim == 1:
         analyze_z1(z, outdir, vg)
     else:
-        analyze_zN(z, outdir, vg, args.skip_umap)
+        analyze_zN(z, outdir, vg, skip_umap=args.skip_umap, num_pcs=args.pc, num_ksamples=args.ksample)
        
     # copy over template if file doesn't exist
     out_ipynb = f'{outdir}/cryoDRGN_viz.ipynb'
     if not os.path.exists(out_ipynb):
         log(f'Creating jupyter notebook...')
         ipynb = f'{cryodrgn._ROOT}/templates/cryoDRGN_viz_template.ipynb'
-        cmd = f'cp {ipynb} {out_ipynb}'
-        subprocess.check_call(cmd, shell=True)
+        shutil.copyfile(ipynb, out_ipynb)
+    else:
+        log(f'{out_ipynb} already exists. Skipping')
+    log(out_ipynb)
+
+    # copy over template if file doesn't exist
+    out_ipynb = f'{outdir}/cryoDRGN_filtering.ipynb'
+    if not os.path.exists(out_ipynb):
+        log(f'Creating jupyter notebook...')
+        ipynb = f'{cryodrgn._ROOT}/templates/cryoDRGN_filtering_template.ipynb'
+        shutil.copyfile(ipynb, out_ipynb)
     else:
         log(f'{out_ipynb} already exists. Skipping')
     log(out_ipynb)

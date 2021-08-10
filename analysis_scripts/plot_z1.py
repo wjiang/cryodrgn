@@ -52,16 +52,12 @@ def main(args):
     plt.xlabel('image')
     plt.ylabel('latent encoding')
     plt.legend(loc='best')
-    if args.o:
+    if args.o: 
         plt.savefig(args.o)
 
     # Plot histogram
     plt.figure()
     sns.distplot(x)
-    if args.o:
-        prefix, suffix = os.path.splitext(args.o)
-        output = f"{prefix}.hist{suffix}"
-        plt.savefig(output)
     plt.show()
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from . import fft
 from . import lie_tools
 from . import utils
+from . import lattice
 
 log = utils.log
 
@@ -21,7 +22,8 @@ class HetOnlyVAE(nn.Module):
             enc_mask = None,
             enc_type = 'linear_lowf',
             enc_dim = None,
-            domain = 'fourier'):
+            domain = 'fourier',
+            activation = nn.ReLU):
         super(HetOnlyVAE, self).__init__()
         self.lattice = lattice
         self.zdim = zdim
@@ -34,24 +36,65 @@ class HetOnlyVAE(nn.Module):
                             qlayers, # nlayers
                             qdim,  # hidden_dim
                             zdim*2, # out_dim
-                            nn.ReLU) 
+                            activation) 
         elif encode_mode == 'mlp':
             self.encoder = MLP(in_dim, 
                             qlayers, 
                             qdim, # hidden_dim
                             zdim*2, # out_dim
-                            nn.ReLU) #in_dim -> hidden_dim
+                            activation) #in_dim -> hidden_dim
         elif encode_mode == 'tilt':
             self.encoder = TiltEncoder(in_dim,
                             qlayers,
                             qdim,
                             zdim*2,
-                            nn.ReLU)
+                            activation)
         else:
             raise RuntimeError('Encoder mode {} not recognized'.format(encode_mode))
         self.encode_mode = encode_mode
-        self.decoder = get_decoder(3+zdim, lattice.D, players, pdim, domain, enc_type, enc_dim, nn.ReLU)
+        self.decoder = get_decoder(3+zdim, lattice.D, players, pdim, domain, enc_type, enc_dim, activation)
    
+    @classmethod
+    def load(self, config, weights=None, device=None):
+        '''Instantiate a model from a config.pkl
+
+        Inputs:
+            config (str, dict): Path to config.pkl or loaded config.pkl
+            weights (str): Path to weights.pkl
+            device: torch.device object
+
+        Returns:
+            HetOnlyVAE instance, Lattice instance
+        '''
+        cfg = utils.load_pkl(config) if type(config) is str else config
+        c = cfg['lattice_args']
+        lat = lattice.Lattice(c['D'], extent=c['extent'])
+        c = cfg['model_args']
+        if c['enc_mask'] > 0:
+            enc_mask = lat.get_circular_mask(c['enc_mask'])
+            in_dim = int(enc_mask.sum())
+        else:
+            assert c['enc_mask'] == -1
+            enc_mask = None
+            in_dim = lat.D**2
+        activation={"relu": nn.ReLU, "leaky_relu": nn.LeakyReLU}[c['activation']]
+        model = HetOnlyVAE(lat, 
+                          c['qlayers'], c['qdim'],
+                          c['players'], c['pdim'],
+                          in_dim, c['zdim'],
+                          encode_mode=c['encode_mode'],
+                          enc_mask=enc_mask,
+                          enc_type=c['pe_type'],
+                          enc_dim=c['pe_dim'],
+                          domain=c['domain'],
+                          activation=activation)
+        if weights is not None:
+            ckpt = torch.load(weights)
+            model.load_state_dict(ckpt['model_state_dict'])
+        if device is not None:
+            model.to(device)
+        return model, lat
+
     def reparameterize(self, mu, logvar):
         if not self.training:
             return mu
@@ -83,6 +126,33 @@ class HetOnlyVAE(nn.Module):
         '''
         return self.decoder(self.cat_z(coords,z))
 
+    # Need forward func for DataParallel -- TODO: refactor
+    def forward(self, *args, **kwargs):
+        return self.decode(*args, **kwargs)
+
+
+def load_decoder(config, weights=None, device=None):
+    '''
+    Instantiate a decoder model from a config.pkl
+
+    Inputs:
+        config (str, dict): Path to config.pkl or loaded config.pkl
+        weights (str): Path to weights.pkl
+        device: torch.device object
+
+    Returns a decoder model 
+    '''
+    cfg = utils.load_pkl(config) if type(config) is str else config
+    c = cfg['model_args']
+    D = cfg['lattice_args']['D']
+    activation={"relu": nn.ReLU, "leaky_relu": nn.LeakyReLU}[c['activation']]
+    model = get_decoder(3, D, c['layers'], c['dim'], c['domain'], c['pe_type'], c['pe_dim'], activation) 
+    if weights is not None:
+        ckpt = torch.load(weights)
+        model.load_state_dict(ckpt['model_state_dict'])
+    if device is not None:
+        model.to(device)
+    return model
 
 def get_decoder(in_dim, D, layers, dim, domain, enc_type, enc_dim=None, activation=nn.ReLU):
     if enc_type == 'none':
@@ -287,26 +357,28 @@ class FTPositionalDecoder(nn.Module):
         assert extent <= 0.5
         if zval is not None:
             zdim = len(zval)
-            z = torch.zeros(D**2, zdim, dtype=torch.float32)
-            z += torch.tensor(zval, dtype=torch.float32)
+            z = torch.tensor(zval, dtype=torch.float32)
 
         vol_f = np.zeros((D,D,D),dtype=np.float32)
         assert not self.training
         # evaluate the volume by zslice to avoid memory overflows
         for i, dz in enumerate(np.linspace(-extent,extent,D,endpoint=True,dtype=np.float32)):
             x = coords + torch.tensor([0,0,dz])
+            keep = x.pow(2).sum(dim=1) <= extent**2
+            x = x[keep]
             if zval is not None:
-                x = torch.cat((x,z), dim=-1)
+                x = torch.cat((x,z.expand(x.shape[0],zdim)), dim=-1)
             with torch.no_grad():
                 if dz == 0.0:
                     y = self.forward(x)
                 else:
                     y = self.decode(x)
                     y = y[...,0] - y[...,1]
-                y = y.view(D,D).cpu().numpy()
-            vol_f[i] = y
+                slice_ = torch.zeros(D**2, device='cpu')
+                slice_[keep] = y.cpu()
+                slice_ = slice_.view(D,D).numpy()
+            vol_f[i] = slice_
         vol_f = vol_f*norm[1]+norm[0]
-        vol_f = utils.zero_sphere(vol_f)
         vol = fft.ihtn_center(vol_f[:-1,:-1,:-1]) # remove last +k freq for inverse FFT
         return vol
 

@@ -1,20 +1,27 @@
 from . import utils
 
-def load_config(config_pkl, args):
+def overwrite_config(config_pkl, args):
     config = utils.load_pkl(config_pkl)
-    if args.norm is None:
-        args.norm = config['dataset_args']['norm']
+    if args.norm is not None:
+        config['dataset_args']['norm'] = args.norm
     v = vars(args)
-    if 'D' in v and args.D is None:
-        args.D = config['lattice_args']['D'] - 1
-    if 'l_extent' in v and args.l_extent is None:
-        args.l_extent = config['lattice_args']['extent']
-    for arg in ('qlayers','qdim','zdim','encode_mode','players','pdim','enc_mask','pe_type','pe_dim','domain'):
+    if 'D' in v and args.D is not None:
+        config['lattice_args']['D'] = args.D + 1
+    if 'l_extent' in v and args.l_extent is not None:
+        config['lattice_args']['extent'] = args.l_extent
+    for arg in ('qlayers','qdim','zdim','encode_mode','players','pdim','enc_mask','pe_type','pe_dim','domain','activation'):
+        # Set default pe_dim to None to maintain backwards compatibility
         if arg == 'pe_dim' and arg not in config['model_args']:
             assert v[arg] is None
-            continue # maintain backwards compatibility 
-        if v[arg] is None:
-            v[arg] = config['model_args'][arg]
-    return args
+            config['model_args']['pe_dim'] = None
+            continue
+        # Set default activation to ReLU to maintain backwards compatibility with v0.3.1 and earlier
+        if arg == 'activation' and arg not in config['model_args']:
+            assert v[arg] == 'relu'
+            config['model_args']['activation'] = 'relu'
+            continue
+        if v[arg] is not None:
+            config['model_args'][arg] = v[arg]
+    return config
 
 
