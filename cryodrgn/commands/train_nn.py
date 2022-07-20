@@ -48,7 +48,6 @@ def add_args(parser):
     group.add_argument('--ind', type=os.path.abspath, help='Filter particle stack by these indices')
     group.add_argument('--lazy', action='store_true', help='Lazy loading if full dataset is too large to fit in memory')
     group.add_argument('--datadir', type=os.path.abspath, help='Path prefix to particle stack if loading relative paths from a .star or .cs file')
-    parser.add_argument('--relion31', action='store_true', help='Flag if relion3.1 star format')
 
     group = parser.add_argument_group('Training parameters')
     group.add_argument('-n', '--num-epochs', type=int, default=20, help='Number of training epochs (default: %(default)s)')
@@ -56,7 +55,7 @@ def add_args(parser):
     group.add_argument('--wd', type=float, default=0, help='Weight decay in Adam optimizer (default: %(default)s)')
     group.add_argument('--lr', type=float, default=1e-4, help='Learning rate in Adam optimizer (default: %(default)s)')
     group.add_argument('--norm', type=float, nargs=2, default=None, help='Data normalization as shift, 1/scale (default: mean, std of dataset)')
-    group.add_argument('--amp', action='store_true', help='Use mixed-precision training')
+    group.add_argument('--no-amp', action='store_false', dest='amp', help='Do not use mixed-precision training')
     group.add_argument('--multigpu', action='store_true', help='Parallelize training across all detected GPUs')
 
     group = parser.add_argument_group('Pose SGD')
@@ -67,12 +66,14 @@ def add_args(parser):
 
     group = parser.add_argument_group('Network Architecture')
     group.add_argument('--layers', type=int, default=3, help='Number of hidden layers (default: %(default)s)')
-    group.add_argument('--dim', type=int, default=256, help='Number of nodes in hidden layers (default: %(default)s)')
+    group.add_argument('--dim', type=int, default=1024, help='Number of nodes in hidden layers (default: %(default)s)')
     group.add_argument('--l-extent', type=float, default=0.5, help='Coordinate lattice size (if not using positional encoding) (default: %(default)s)')
-    group.add_argument('--pe-type', choices=('geom_ft','geom_full','geom_lowf','geom_nohighf','linear_lowf','none'), default='geom_lowf', help='Type of positional encoding (default: %(default)s)')
+    group.add_argument('--pe-type', choices=('geom_ft','geom_full','geom_lowf','geom_nohighf','linear_lowf','gaussian','none'), default='gaussian', help='Type of positional encoding (default: %(default)s)')
     group.add_argument('--pe-dim', type=int, help='Num sinusoid features in positional encoding (default: D/2)')
     group.add_argument('--domain', choices=('hartley','fourier'), default='fourier', help='Volume decoder representation (default: %(default)s)')
     group.add_argument('--activation', choices=('relu','leaky_relu'), default='relu', help='Activation (default: %(default)s)')
+    group.add_argument('--feat-sigma', type=float, default=0.5, help="Scale for random Gaussian features")
+
     return parser
 
 def save_checkpoint(model, lattice, optim, epoch, norm, Apix, out_mrc, out_weights):
@@ -88,28 +89,44 @@ def save_checkpoint(model, lattice, optim, epoch, norm, Apix, out_mrc, out_weigh
         'optimizer_state_dict':optim.state_dict(),
         }, out_weights)
 
-def train(model, lattice, optim, y, rot, trans=None, ctf_params=None, use_amp=False):
+def train(model, lattice, optim, y, rot, trans=None, ctf_params=None, use_amp=False, scaler=None):
     model.train()
     optim.zero_grad()
     B = y.size(0)
     D = lattice.D
-    # reconstruct circle of pixels instead of whole image
-    mask = lattice.get_circular_mask(D//2)
-    yhat = model(lattice.coords[mask] @ rot).view(B,-1)
-    if ctf_params is not None:
-        freqs = lattice.freqs2d[mask]
-        freqs = freqs.unsqueeze(0).expand(B, *freqs.shape)/ctf_params[:,0].view(B,1,1)
-        yhat *= ctf.compute_ctf(freqs, *torch.split(ctf_params[:,1:], 1, 1))
-    y = y.view(B,-1)[:, mask]
-    if trans is not None:
-        y = lattice.translate_ht(y, trans.unsqueeze(1), mask).view(B,-1)
-    loss = F.mse_loss(yhat, y)
+    def run_model(y):
+        '''Helper function'''
+        # reconstruct circle of pixels instead of whole image
+        mask = lattice.get_circular_mask(D//2)
+        yhat = model(lattice.coords[mask] @ rot).view(B,-1)
+        if ctf_params is not None:
+            freqs = lattice.freqs2d[mask]
+            freqs = freqs.unsqueeze(0).expand(B, *freqs.shape)/ctf_params[:,0].view(B,1,1)
+            yhat *= ctf.compute_ctf(freqs, *torch.split(ctf_params[:,1:], 1, 1))
+        y = y.view(B,-1)[:, mask]
+        if trans is not None:
+            y = lattice.translate_ht(y, trans.unsqueeze(1), mask).view(B,-1)
+        return F.mse_loss(yhat, y)
+    
+    # Cast operations to mixed precision if using torch.cuda.amp.GradScaler()
+    if scaler is not None:
+        with torch.cuda.amp.autocast():
+            loss = run_model(y)
+    else:
+        loss = run_model(y)
+
     if use_amp:
-        with amp.scale_loss(loss, optim) as scaled_loss:
-            scaled_loss.backward()
+        if scaler is not None: # torch mixed precision
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+        else: # apex.amp mixed precision
+            with amp.scale_loss(loss, optim) as scaled_loss:
+                scaled_loss.backward()
+            optim.step()
     else:
         loss.backward()
-    optim.step()
+        optim.step()
     return loss.item()
 
 def save_config(args, dataset, lattice, model, out_config):
@@ -129,6 +146,7 @@ def save_config(args, dataset, lattice, model, out_config):
     model_args = dict(layers=args.layers,
                       dim=args.dim,
                       pe_type=args.pe_type,
+                      feat_sigma=args.feat_sigma,
                       pe_dim=args.pe_dim,
                       domain=args.domain,
                       activation=args.activation)
@@ -143,18 +161,18 @@ def save_config(args, dataset, lattice, model, out_config):
                     version=cryodrgn.__version__)
         pickle.dump(meta, f)
 
-def get_latest(args):
+def get_latest(args, flog):
     # assumes args.num_epochs > latest checkpoint
-    log('Detecting latest checkpoint...') 
+    flog('Detecting latest checkpoint...') 
     weights = [f'{args.outdir}/weights.{i}.pkl' for i in range(args.num_epochs)]
     weights = [f for f in weights if os.path.exists(f)]
     args.load = weights[-1]
-    log(f'Loading {args.load}')
+    flog(f'Loading {args.load}')
     if args.do_pose_sgd:
         i = args.load.split('.')[-2]
         args.poses = f'{args.outdir}/pose.{i}.pkl'
         assert os.path.exists(args.poses)
-        log(f'Loading {args.poses}')
+        flog(f'Loading {args.poses}')
     return args
 
 def main(args):
@@ -177,9 +195,7 @@ def main(args):
     use_cuda = torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
     flog('Use cuda {}'.format(use_cuda))
-    if use_cuda:
-        torch.set_default_tensor_type(torch.cuda.FloatTensor)
-    else:
+    if not use_cuda:
         flog('WARNING: No GPUs detected')
 
     # load the particles
@@ -188,18 +204,19 @@ def main(args):
         ind = pickle.load(open(args.ind,'rb'))
     else: ind = None
     if args.lazy:
-        data = dataset.LazyMRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, window=args.window, datadir=args.datadir, relion31=args.relion31, window_r=args.window_r)
+        data = dataset.LazyMRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, window=args.window, datadir=args.datadir, window_r=args.window_r, flog=flog)
     else:
-        data = dataset.MRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, window=args.window, datadir=args.datadir, relion31=args.relion31, window_r=args.window_r)
+        data = dataset.MRCData(args.particles, norm=args.norm, invert_data=args.invert_data, ind=ind, window=args.window, datadir=args.datadir, window_r=args.window_r, flog=flog)
     D = data.D
     Nimg = data.N
 
     # instantiate model
     #if args.pe_type != 'none': assert args.l_extent == 0.5
-    lattice = Lattice(D, extent=args.l_extent)
+    lattice = Lattice(D, extent=args.l_extent, device=device)
 
     activation={"relu": nn.ReLU, "leaky_relu": nn.LeakyReLU}[args.activation]
-    model = models.get_decoder(3, D, args.layers, args.dim, args.domain, args.pe_type, enc_dim=args.pe_dim, activation=activation)
+    model = models.get_decoder(3, D, args.layers, args.dim, args.domain, args.pe_type, enc_dim=args.pe_dim, activation=activation, feat_sigma=args.feat_sigma)
+    model.to(device)
     flog(model)
     flog('{} parameters in model'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -221,17 +238,17 @@ def main(args):
     # load poses
     if args.do_pose_sgd:
         assert args.domain == 'hartley', "Need to use --domain hartley if doing pose SGD"
-        posetracker = PoseTracker.load(args.poses, Nimg, D, args.emb_type, ind)
+        posetracker = PoseTracker.load(args.poses, Nimg, D, args.emb_type, ind, device=device)
         pose_optimizer = torch.optim.SparseAdam(list(posetracker.parameters()), lr=args.pose_lr)
     else:
-        posetracker = PoseTracker.load(args.poses, Nimg, D, None, ind)
+        posetracker = PoseTracker.load(args.poses, Nimg, D, None, ind, device=device)
 
     # load CTF
     if args.ctf is not None:
         flog('Loading ctf params from {}'.format(args.ctf))
         ctf_params = ctf.load_ctf_for_training(D-1, args.ctf)
         if args.ind is not None: ctf_params = ctf_params[ind]
-        ctf_params = torch.tensor(ctf_params)
+        ctf_params = torch.tensor(ctf_params, device=device)
     else: ctf_params = None
     Apix = ctf_params[0,0] if ctf_params is not None else 1
 
@@ -240,12 +257,16 @@ def main(args):
     save_config(args, data, lattice, model, out_config)
 
     # Mixed precision training with AMP
+    scaler = None
     if args.amp:
-        assert args.batch_size % 8 == 0
-        assert (D-1) % 8 == 0
-        assert args.dim % 8 == 0
+        assert args.batch_size % 8 == 0, "Batch size must be divisible by 8 for AMP training"
+        assert (D-1) % 8 == 0, "Image size must be divisible by 8 for AMP training"
+        assert args.dim % 8 == 0, "Decoder hidden layer dimension must be divisible by 8 for AMP training"
         # Also check zdim, enc_mask dim?
-        model, optim = amp.initialize(model, optim, opt_level='O1')
+        try: # Mixed precision with apex.amp
+            model, optim = amp.initialize(model, optim, opt_level='O1')
+        except: # Mixed precision with pytorch (v1.6+)
+            scaler = torch.cuda.amp.GradScaler()
 
     # parallelize
     if args.multigpu and torch.cuda.device_count() > 1:
@@ -265,13 +286,12 @@ def main(args):
         batch_it = 0
         for batch, ind in data_generator:
             batch_it += len(ind)
-            y = batch.to(device)
             ind = ind.to(device)
             if args.do_pose_sgd:
                 pose_optimizer.zero_grad()
             r, t = posetracker.get_pose(ind)
             c = ctf_params[ind] if ctf_params is not None else None
-            loss_item = train(model, lattice, optim, batch.to(device), r, t, c, use_amp=args.amp)
+            loss_item = train(model, lattice, optim, batch.to(device), r, t, c, use_amp=args.amp, scaler=scaler)
             if args.do_pose_sgd and epoch >= args.pretrain:
                 pose_optimizer.step()
             loss_accum += loss_item*len(ind)
@@ -295,7 +315,7 @@ def main(args):
         posetracker.save(out_pose)
    
     td = dt.now()-t1
-    flog('Finsihed in {} ({} per epoch)'.format(td, td/(args.num_epochs-start_epoch)))
+    flog('Finished in {} ({} per epoch)'.format(td, td/(args.num_epochs-start_epoch)))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)

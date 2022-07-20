@@ -9,3 +9,7 @@
 0.3.0  -- GPU parallelization and updated interface/defaults
 0.3.1  -- Minor updates: New script write_starfile.py
 0.3.2  -- Minor updates: New jupyter notebook for filtering
+0.3.3  -- Faster image preprocessing and smaller memory footprint
+0.3.4  -- Minor updates to helper scripts
+1.0.0  -- Official cryoDRGN version 1.0 release, new tools
+1.1.0  -- New defaults for model architecutre
