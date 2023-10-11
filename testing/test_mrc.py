@@ -1,20 +1,19 @@
-# coding: utf-8
-import sys, os
-from cryodrgn import mrc
 import numpy as np
-data, _ = mrc.parse_mrc('data/toy_projections.mrcs', lazy=True)
-data2, _ = mrc.parse_mrc('data/toy_projections.mrcs', lazy=False)
-data1=np.asarray([x.get() for x in data])
-assert (data1==data2).all()
-print('ok')
+from cryodrgn.source import ImageSource
 
-from cryodrgn import dataset
-data2 = dataset.load_particles('data/toy_projections.star')
-assert (data1==data2).all()
-print('ok')
+data = ImageSource.from_file("data/toy_projections.mrcs", lazy=True)
+data2 = ImageSource.from_file("data/toy_projections.mrcs", lazy=False).images()
+data2 = np.array(data2)
+data1 = np.array(data[:])
+assert (data1 == data2).all()
+print("ok")
 
-data2 = dataset.load_particles('data/toy_projections.txt')
-assert (data1==data2).all()
-print('ok')
+data2 = np.array(ImageSource.from_file("data/toy_projections.star").images())
+assert (data1 == data2).all()
+print("ok")
 
-print('all ok')
+data2 = np.array(ImageSource.from_file("data/toy_projections.txt").images())
+assert (data1 == data2).all()
+print("ok")
+
+print("all ok")

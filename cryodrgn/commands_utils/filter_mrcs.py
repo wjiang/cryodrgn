@@ -1,30 +1,29 @@
-'''Filter a particle stack'''
+"""Filter a particle stack"""
 
 import argparse
-import numpy as np
-import sys, os
-import pickle
-
+import logging
 from cryodrgn import utils
-from cryodrgn import dataset
-from cryodrgn import mrc
-log = utils.log 
+from cryodrgn.mrc import MRCFile
+from cryodrgn.source import ImageSource
+
+logger = logging.getLogger(__name__)
+
 
 def add_args(parser):
-    parser.add_argument('input', help='Input particles (.mrcs, .txt, .star, .cs)')
-    parser.add_argument('--ind', required=True, help='Selected indices array (.pkl)')
-    parser.add_argument('-o', help='Output .mrcs file')
+    parser.add_argument("input", help="Input particles (.mrcs, .txt, .star, .cs)")
+    parser.add_argument("--ind", required=True, help="Selected indices array (.pkl)")
+    parser.add_argument("-o", help="Output .mrcs file")
     return parser
 
-def main(args):
-    x = dataset.load_particles(args.input, lazy=True)
-    log(f'Loaded {len(x)} particles')
-    ind = utils.load_pkl(args.ind)
-    x = np.array([x[i].get() for i in ind])
-    log(f'New dimensions: {x.shape}')
-    mrc.write(args.o,x)
 
-if __name__ == '__main__':
+def main(args):
+    ind = utils.load_pkl(args.ind)
+    src = ImageSource.from_file(args.input, lazy=True, indices=ind)
+    logger.info(f"Loaded {len(src)} particles")
+    MRCFile.write(args.o, src)
+
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     args = add_args(parser).parse_args()
     main(args)
